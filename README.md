@@ -1,2 +1,2 @@
-# org-ref-ok
-An org-ref extension.
+# org-citeseeing
+An Org extension to render citations.
