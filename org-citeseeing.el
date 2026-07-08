@@ -36,6 +36,13 @@
 (require 's)
 (require 'seq)
 
+(defvar org-citeseeing-csl--styles-dir nil)
+(defvar org-citeseeing-csl--locales-dir nil)
+(defvar org-citeseeing--cite-commands nil)
+(defvar org-citeseeing--citeproc-modes
+  '( author-only bib-entry locator-only nil suppress-author
+     textual title-only year-only ))
+
 (defgroup org-citeseeing nil
   "Customization group for `org-citeseeing'."
   :group 'faces
@@ -46,78 +53,117 @@
   :type 'boolean
   :group 'org-citeseeing)
 
-(defcustom org-citeseeing-bibliography
-  citar-bibliography
-  "Bibliography files."
+(defcustom org-citeseeing-bibliography nil
+  "Bibliography files to watch."
   :type '(choice
           (repeat :tag "Literal list of files" file)
           (function :tag "Function returning file list")
           (variable :tag "Variable holding file list"))
   :group 'org-citeseeing)
 
-(defcustom org-citeseeing-cache-eviction-registry
-  '(citar-cache--update-bibliography
-    bibtex-completion-clear-cache)
-  "Function registry for adding after-advise for cache eviction."
-  :type '(repeat :tag "List of functions to add cache eviction" function))
+(defcustom org-citeseeing-bib-item-value-getter nil
+  "A function that takes in a field name and a citekey as arguments.
+It should return the field value from the record with given citekey."
+  :type 'function
+  :group 'org-citeseeing)
+
+(defcustom org-citeseeing-bib-item-locale-getter nil
+  "A function that takes in a citekey as an argument and returns the locale
+string (e.g., 'en-US', 'ja-JP')."
+  :type 'function
+  :group 'org-citeseeing)
+
+(defcustom org-citeseeing-bib-item-locale-default "en-US"
+  "Default locale to use when not found in bibliography items."
+  :type 'string
+  :group 'org-citeseeing)
 
 (defcustom org-citeseeing-csl-dir
   "/usr/share/citation-style-language"
   "The CSL directory path.
-On Debian, you need the following packages:
-
-  - citation-style-language-locales
-  - citation-style-language-styles
-
-to fill the necessary files under this directory tree."
+The subdirectories 'styles' (for style files) and 'locales' (for locale files)
+should exist under this directory."
   :type 'directory
+  :set (lambda (sym val)
+         (set-default sym val)
+         (setq-default org-citeseeing-csl--styles-dir
+                       (file-name-concat val "styles")
+                       org-citeseeing-csl--locales-dir
+                       (file-name-concat val "locales")))
   :group 'org-citeseeing)
 
 (defcustom org-citeseeing-csl-style
   "chicago-note-bibliography.csl"
-  "A function or string file path. See `org-citeseeing--citeproc-csl-style'."
-  :type '(choice (function :tag "Function")
-                 (file :tag "Path to CSL style file"))
+  "A function or a filesystem path to a CSL style file.
+A function should take two arguments, a command (e.g., 'cite') and a
+locale (e.g., 'en-US'), returning a CSL style file path.
+
+Unless the file path is absolute, it will be sought in `org-citeseeing-csl--styles-dir'."
+  :type '(choice
+          (function :tag "Function returning CSL style file")
+          (file :tag "Path to CSL style file"))
   :group 'org-citeseeing)
 
 (defcustom org-citeseeing-command-alist
-  '((("cite" "Cite" "parencite" "Parencite") . ((nil) "${nil}"))
-    (("citeauthor" "citeauthor*") . ((author-only) "${author-only}"))
-    (("citetitle" "citetitle*" "citeurl") . ((title-only) "${title-only}"))
-    (("citeyear" "citeyear*") . ((year-only) "${year-only}"))
-    ;; (("footfullcite") . ((nil) "${nil}"))
-    (("fullcite") . ((bib-entry) "${bib-entry}"))
-    ;; (("textcite") . ((author-only year-only) "${author-only} (${year-only})"))
-    ;; (("textcite-bare") . ((author-only year-only) "${author-only} ${year-only}"))
-    )
-  "Alist mapping of cite commands to string format.
-Each value is a list of (MODES FORMAT-STRING)."
-  :type 'alist
-  :set (lambda (sym val)
-         (set-default sym val)
-         (setq org-citeseeing--commands
-               (seq-mapcat #'car org-citeseeing-command-alist)))
+  '((("cite" "Cite" "parencite" "Parencite") . "${cp:nil}")
+    (("citeauthor" "citeauthor*") . "${cp:author-only}")
+    (("citetitle" "citetitle*" "citeurl") . "${cp:title-only}")
+    (("citeyear" "citeyear*") . "${cp:year-only}")
+    ("fullcite" . "${cp:bib-entry}"))
+  "Alist mapping of cite command(s) to `s-string' formatter.
+The field name starting with 'cp:' refers to a `citeproc' mode (see
+`org-citeseeing--citeproc-modes' for all available modes). A non-mode field referes to that of
+current bibliography item, its value obtained via `org-citeseeing-bib-item-value-getter'."
+  :type '(alist :key-type (choice (string :tag "Single command")
+                                  (repeat :tag "List of commands" string))
+                :value-type (string :tag "Format template"))
+  :set
+  (lambda (sym val)
+    (set-default sym val)
+
+    ;; Ensure `org-citeseeing--cite-commands' is an empty hash table:
+    (if (and org-citeseeing--cite-commands
+             (hash-table-p org-citeseeing--cite-commands))
+        (clrhash org-citeseeing--cite-commands)
+      (setq-default org-citeseeing--cite-commands
+                    (make-hash-table :test #'equal)))
+
+    (pcase-dolist (`(,commands . ,fmt) val)
+      (dolist (command (or (and (stringp commands) (list commands))
+                           commands))
+        (let ((modes
+               (mapcar #'intern
+                       (seq-keep
+                        (lambda (item)
+                          (let ((field (cadr item)))
+                            (and (string-prefix-p "cp:" field)
+                                 (substring field 3))))
+                        (s-match-strings-all "\\${\\([^}]+\\)}" fmt)))))
+          (puthash command (list modes fmt) org-citeseeing--cite-commands)))))
   :group 'org-citeseeing)
 
+(defcustom org-citeseeing-cache-eviction-registry
+  '(citar-cache--update-bibliography
+    bibtex-completion-clear-cache)
+  "Function registry for adding after-advise for cache eviction.
+The cache eviction is necessary to keep bibliography in sync with the
+bibliography manager you are using (e.g., `bibtex-completion' or `citar'."
+  :type '(repeat :tag "List of functions to add cache eviction" function))
+
 (defface org-citeseeing-cite-face '((t :inherit org-cite))
-  "TBD.")
+  "Face used for citation.")
 
 (defface org-citeseeing-cite-error-face '((t :inherit org-warning))
-  "TBD.")
-
-(defvar org-citeseeing--commands nil)
-(defvar org-citeseeing--citeproc-modes
-  '( author-only bib-entry locator-only nil suppress-author
-     textual title-only year-only ))
+  "Face used for citation when error occurs while rendering.")
 
 ;;;###autoload
 (define-minor-mode org-citeseeing-mode
   "Minor mode for org-citeseeing support."
-  :lighter " orvis"
+  :lighter " OCs"
   :group 'org-citeseeing
-  (pcase org-citeseeing-mode
-    ('t (org-citeseeing-mode--on))
-    (_ (org-citeseeing-mode--off))))
+  (if org-citeseeing-mode
+      (org-citeseeing-mode--on)
+    (org-citeseeing-mode--off)))
 
 (defun org-citeseeing-mode--on ()
   "Activate `org-citeseeing-mode'."
@@ -164,6 +210,7 @@ Intercepts font-lock execution to inject dynamic display strings."
 
 (defun org-citeseeing--cache-clear (&rest _args)
   "Reset item getter."
+  (interactive)               ; add for debug convenience
   (setq org-citeseeing--citeproc-itemgetter--cache nil
         org-citeseeing--citeproc-proc--cache nil))
 
@@ -176,30 +223,23 @@ Intercepts font-lock execution to inject dynamic display strings."
       (and (symbolp org-citeseeing-bibliography)
            (symbol-value org-citeseeing-bibliography))))
 
-(defun org-citeseeing--citeproc-csl-style (command lang)
-  "Get CSL style file path.
-If `org-citeseeing-csl-style' is a function, it will be called with `(command lang)' as
-arguments. Otherwise, it should be a string file path, either absolute or
-relative (to `org-citeseeing-csl-dir/styles')."
-  (let* ((style-file
-          (cond
-           ((functionp org-citeseeing-csl-style)
-            (funcall org-citeseeing-csl-style command lang))
-           (t
-            (if (file-name-absolute-p org-citeseeing-csl-style)
-                org-citeseeing-csl-style
-              (file-name-concat org-citeseeing-csl-dir
-                                "styles"
-                                org-citeseeing-csl-style))))))
-    (if (and style-file (file-exists-p style-file))
-        style-file
-      (error "CSL style file not found (%s)" style-file))))
+(defun org-citeseeing--citeproc-csl-style (command locale)
+  "Get CSL style file path for COMMAND in LOCALE."
+  (if-let* ((path (expand-file-name
+                   (cond
+                    ((functionp org-citeseeing-csl-style)
+                     (funcall org-citeseeing-csl-style command locale))
+                    (t org-citeseeing-csl-style))
+                   org-citeseeing-csl--styles-dir))
+            (path (and (file-exists-p path) path)))
+      path
+    (error "CSL style file not found (%s)" path)))
 
 (defun org-citeseeing--citeproc-csl-locale-getter ()
   "Return CSL locale getter function.
 In Debian, the directory is installed with the citation-style-language-locales
 package."
-  (let ((dir (file-name-concat org-citeseeing-csl-dir "locales")))
+  (let ((dir org-citeseeing-csl--locales-dir))
     (if (file-directory-p dir)
         (citeproc-locale-getter-from-dir dir)
       (error "CSL locales directory not found (%s)" dir))))
@@ -262,78 +302,61 @@ The itemgetter function gets cached for BIB-FILES and will be reused."
   (citeproc-append-citations citations proc)
   (citeproc-render-citations proc 'org 'no-links))
 
-(defun org-citeseeing--citeproc-render-spec (command)
-  "Look up COMMAND in `org-citeseeing-command-alist'.
-Returns a list containing (MODES FORMAT-STRING). Defaults to ((nil) \"%s\")."
-  (if-let* ((entry (seq-find (lambda (x) (member command (car x)))
-                             org-citeseeing-command-alist)))
-      (cdr entry)
-    '((nil) "%s")))
-
-(defun org-citeseeing-item-locale (citekey)
-  (if-let* ((langid (citar-get-value "langid" citekey))
-            (locale (alist-get langid
-                               citeproc-blt--langid-to-lang-alist
-                               nil nil #'equal)))
-      locale
-    "en-US"))
+;; (defun org-citeseeing--citeproc-render-spec (command)
+;;   "Look up COMMAND in `org-citeseeing-command-alist'.
+;; Returns a list containing (MODES FORMAT-STRING). Defaults to ((nil) \"%s\")."
+;;   (if-let* ((entry (seq-find (lambda (x) (member command (car x)))
+;;                              org-citeseeing-command-alist)))
+;;       (cdr entry)
+;;     '((nil) "%s")))
 
 (defun org-citeseeing-render (citekey command)
   "Render CITEKEY according to COMMAND."
-  (pcase-let ((`(,modes ,r-format) (org-citeseeing--citeproc-render-spec command)))
-    (if-let* ((locale (org-citeseeing-item-locale citekey))
-              (proc (org-citeseeing--citeproc-proc command locale))
-              (citations (mapcar
-                          (lambda (mode)
-                            (when (member mode org-citeseeing--citeproc-modes)
-                              (org-citeseeing--citeproc-citation-create
-                               (list citekey) mode)))
-                          modes)))
-        (let* ((mode-to-s
-                (cl-pairlis
-                 modes (org-citeseeing--citeproc-citation-render proc citations))))
-          (s-format r-format
-                    (lambda (key)
-                      (let ((mode (intern key)))
-                        (or (alist-get mode mode-to-s)
-                            ;; (alist-get mode item)
-                            )))))
-      (error "Item cannot be rendered (%s)" citekey))))
-
-(defun org-citeseeing-render-isolated (citekey command)
-  "Render CITEKEY according to COMMAND format.
-This version renders isolated references using `citeproc-create-style' and
-`citeproc-render-item'."
-  (if-let* ((ig (org-citeseeing--citeproc-itemgetter (org-citeseeing-bibliography)))
-            (item (cdr (assoc citekey (funcall ig (list citekey)))))
-            (lang (or (cdr (assoc "language" item))
-                      (cdr (assoc 'language item))
-                      "en-US"))
-            (lg (org-citeseeing--citeproc-csl-locale-getter))
-            (style (citeproc-create-style
-                    (org-citeseeing--citeproc-csl-style command lang) lg)))
-      (citeproc-render-item item style 'bib 'org)
-    (error "Item cannot be rendered (%s)" citekey)))
+  (if-let* ((spec (gethash command org-citeseeing--cite-commands)))
+      (let* ((modes (car spec))
+             (r-format (cadr spec))
+             (locale (or (and (functionp org-citeseeing-bib-item-locale-getter)
+                              (funcall org-citeseeing-bib-item-locale-getter citekey))
+                         org-citeseeing-bib-item-locale-default))
+             (proc (org-citeseeing--citeproc-proc command locale))
+             (citations
+              (mapcar (lambda (mode)
+                        (org-citeseeing--citeproc-citation-create
+                         (list citekey) mode))
+                      modes))
+             (mode-to-str
+              (cl-pairlis modes
+                          (org-citeseeing--citeproc-citation-render
+                           proc citations))))
+        (s-format r-format
+                  (lambda (field)
+                    (if (string-prefix-p "cp:" field)
+                        (let ((field (intern (substring field 3))))
+                          (or (alist-get field mode-to-str)
+                              (format "?%s?" field)))
+                      (or (and (functionp org-citeseeing-bib-item-value-getter)
+                               (funcall org-citeseeing-bib-item-value-getter
+                                        field citekey))
+                          (format "?%s?" field))))))
+    (error "Unknown renderer spec for cite command (%s)" command)))
 
 (defun org-citeseeing--propertize (str &optional face)
   "Convert plain Org text tokens in STR into proper face properties.
 When given, FACE is applied additionally."
-  (let* ((s str)
-
-         ;; BUG(2026-06-05): Somehow, `citeproc-render-item' can produce
+  (let* (;; BUG(2026-06-05): Somehow, `citeproc-render-item' can produce
          ;; Org-rendered string including these HTML tags. Strip them here.
          (case-fold-search t)
-         (s (replace-regexp-in-string
-             "<Span Class=\"Nocase\">\\|</Span>" "" s))
+         (str (replace-regexp-in-string
+               "<Span Class=\"Nocase\">\\|</Span>" "" str))
 
-         (s (with-temp-buffer
-              (insert s)
-              (org-mode)
-              (font-lock-ensure)
-              (buffer-string))))
+         (str (with-temp-buffer
+                (insert str)
+                (org-mode)
+                (font-lock-ensure)
+                (buffer-string))))
     (when face
-      (add-face-text-property 0 (length s) face t s))
-    s))
+      (add-face-text-property 0 (length str) face t str))
+    str))
 
 (defun org-citeseeing-links-generator (lnk)
   "A default fallback generator for link (LNK).
@@ -342,24 +365,31 @@ LNK is the content of an Org link, meaning [[LNK][...]]."
       (when-let*
           ((type (match-string 1 lnk))
            (path (match-string 2 lnk))
-           (citekey (and (member type org-citeseeing--commands)
+           (citekey (and (gethash type org-citeseeing--cite-commands)
                          (when (string-match "\\`&\\(.*\\)" path)
-                           (substring-no-properties (match-string 1 path))))))
-        (apply #'org-citeseeing--propertize
-               (catch 'error-intercepted
-                 (handler-bind
-                     ((error
-                       (lambda (err)
-                         (let ((em (error-message-string err)))
-                           (message "Error: %s" em)
-                           (when org-citeseeing-debug
-                             (message "Backtrace:\n%s" (backtrace-to-string)))
-                           (throw 'error-intercepted
-                                  (list (format "%s:%s (err: %s)"
-                                                type citekey em)
-                                        'org-citeseeing-cite-error-face))))))
-                   (list (org-citeseeing-render citekey type)
-                         'org-citeseeing-cite-face)))))))
+                           (substring-no-properties (match-string 1 path)))))
+           (str
+            (catch 'error-intercepted
+              (handler-bind
+                  ((error
+                    (lambda (err)
+                      (let ((em (error-message-string err)))
+                        (message "Error: %s" em)
+                        (when org-citeseeing-debug
+                          (message "Backtrace:\n%s" (backtrace-to-string)))
+                        (throw 'error-intercepted
+                               (list (format "%s:%s (err: %s)"
+                                             type citekey em)
+                                     'org-citeseeing-cite-error-face))))))
+                (list (org-citeseeing-render citekey type)
+                      'org-citeseeing-cite-face)))))
+        (apply #'org-citeseeing--propertize str))))
+
+;;; Utility Functions
+
+(defun org-citeseeing-langid-to-locale (langid)
+  "Get locale for given LANGID."
+  (alist-get langid citeproc-blt--langid-to-lang-alist nil nil #'equal))
 
 (provide 'org-citeseeing)
 ;;; org-citeseeing.el ends here
