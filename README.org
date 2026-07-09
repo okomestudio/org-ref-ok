@@ -1,0 +1,40 @@
+#+TITLE: org-citeseeing
+
+An Emacs Org-mode extension to dynamically alter and render inline citation links.
+
+~org-citeseeing~ is an Org-mode extension (primarily targeting ~org-ref~ ecosystems) that dynamically renders inline citation links. It transforms raw citation syntax in your active buffers into clean, human-readable display strings using user-defined formatting templates.
+
+*Features*:
+
+- *Dynamic Inline Prettification:* Overlays and re-renders link tokens into readable layouts on the fly.
+- *Polymorphic Command Grouping:* Binds singular or grouped citation actions under universal formats.
+- *Template-Driven Customization:* Leverages field-extraction tags to pinpoint exactly what components appear inline.
+
+* Installation & Configuration
+
+You can integrate ~org-citeseeing~ into your development environment via ~use-package~. Configure your personalized command mappings using the native ~:custom~ block:
+
+#+begin_src elisp
+(use-package org-citeseeing
+  :load-path "path/to/org-citeseeing" ; Update if tracking manually
+  :custom
+  (org-citeseeing-command-alist
+   '((("cite" "Cite" "parencite" "Parencite") . "${cp:nil}")
+     (("citeauthor" "citeauthor*")           . "${cp:author-only}")
+     (("citetitle" "citetitle*" "citeurl")   . "${cp:title-only}")
+     (("citeyear" "citeyear*")               . "${cp:year-only}")
+     ("fullcite"                             . "${cp:bib-entry}"))))
+#+end_src
+
+* Usage & Core Mechanics
+
+The package evaluates your buffer's links against ~org-citeseeing-command-alist~.
+
+Each configured item follows a clear structure:
+
+- *Key (car):* A single string command name or a flat list of alternative command names (e.g. ~"citeauthor*"~, ~"citeauthor"~).
+- *Value (cdr):* The string template format containing replacement hooks (e.g., ~"${cp:author-only}"~) indicating how the citation data should look.
+
+* License
+
+This project is licensed under the terms of the *GPL-3.0 License*.
