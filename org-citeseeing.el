@@ -103,13 +103,16 @@ Unless the file path is absolute, it will be sought in `org-citeseeing-csl--styl
   :group 'org-citeseeing)
 
 (defcustom org-citeseeing-command-alist
-  '((("cite" "Cite" "parencite" "Parencite") . ("" "${cp:nil}" ""))
-    (("citep" "citep*") . ("(" "${cp:nil}" ")"))
-    (("citet" "citet*") . ("" "${cp:author-only} (${cp:year-only})" ""))
-    (("citeauthor" "citeauthor*") . ("" "${cp:author-only}" ""))
-    (("citetitle" "citetitle*" "citeurl") . ("" "${cp:title-only}" ""))
-    (("citeyear" "citeyear*") . ("" "${cp:year-only}" ""))
-    ("fullcite" . ("" "${cp:bib-entry}" "")))
+  '((("cite" "Cite" "parencite" "Parencite") . (:cite-format "${cp:nil}"))
+    (("citep" "citep*") . ( :outer-prefix "("
+                            :cite-format "${cp:nil}"
+                            :outer-suffix ")" ))
+    (("citet" "citet*") . ( :cite-format "${cp:author-only} (${cp:year-only}"
+                            :inner-suffix ")" ))
+    (("citeauthor" "citeauthor*") . (:cite-format "${cp:author-only}"))
+    (("citetitle" "citetitle*" "citeurl") . (:cite-format "${cp:title-only}"))
+    (("citeyear" "citeyear*") . (:cite-format "${cp:year-only}"))
+    ("fullcite" . (:cite-format "${cp:bib-entry}")))
   "Alist mapping of cite command(s) to string format template.
 See `org-citeseeing--format' for detail on string format template.
 
@@ -118,7 +121,15 @@ The field name starting with 'cp:' refers to a `citeproc' mode (see
 current bibliography item, its value obtained via `org-citeseeing-bib-item-value-getter'."
   :type '(alist :key-type (choice (string :tag "Single command")
                                   (repeat :tag "List of commands" string))
-                :value-type (repeat :tag "List of prefix format suffix" string))
+                :value-type
+                (plist :key-type
+                       (choice
+                        (const :tag "Outer prefix string" :outer-prefix)
+                        (const :tag "Inner prefix string" :inner-prefix)
+                        (const :tag "Citation format string" :cite-format)
+                        (const :tag "Inner suffix string" :inner-suffix)
+                        (const :tag "Outer suffix string" :outer-suffix))
+                       :value-type string))
   :set
   (lambda (sym val)
     (set-default sym val)
@@ -131,20 +142,19 @@ current bibliography item, its value obtained via `org-citeseeing-bib-item-value
       (setq-default org-citeseeing--cite-commands
                     (make-hash-table :test #'equal)))
 
-    (pcase-dolist (`(,commands . (,prefix ,fmt ,suffix)) val)
+    (pcase-dolist (`(,commands . ,spec) val)
       (dolist (command (or (and (stringp commands) (list commands))
                            commands))
-        (let ((modes
-               (mapcar #'intern
-                       (seq-keep
-                        (lambda (item)
-                          (let ((field (cadr item)))
-                            (and (string-prefix-p "cp:" field)
-                                 (substring field 3))))
-                        (s-match-strings-all "\\${\\([^}]+\\)}" fmt)))))
-          (puthash command
-                   (list modes (list prefix fmt suffix))
-                   org-citeseeing--cite-commands)))))
+        (let* ((fmt (plist-get spec :cite-format))
+               (modes
+                (mapcar #'intern
+                        (seq-keep
+                         (lambda (item)
+                           (let ((field (cadr item)))
+                             (and (string-prefix-p "cp:" field)
+                                  (substring field 3))))
+                         (s-match-strings-all "\\${\\([^}]+\\)}" fmt)))))
+          (puthash command (list modes spec) org-citeseeing--cite-commands)))))
   :group 'org-citeseeing)
 
 (defcustom org-citeseeing-cache-eviction-registry
@@ -402,9 +412,9 @@ When given, FACE is applied additionally."
       (if-let* ((cc (gethash command org-citeseeing--cite-commands))
                 (modes (car cc))
                 (fmt-spec (cadr cc))
-                (prefix (nth 0 fmt-spec))
-                (r-format (nth 1 fmt-spec))
-                (suffix (nth 2 fmt-spec)))
+                (prefix (or (plist-get fmt-spec :inner-prefix) ""))
+                (r-format (plist-get fmt-spec :cite-format))
+                (suffix (or (plist-get fmt-spec :inner-suffix) "")))
           (let* ((locale (or (and (functionp org-citeseeing-bib-item-locale)
                                   (funcall org-citeseeing-bib-item-locale citekey))
                              org-citeseeing-bib-item-locale))
@@ -425,49 +435,54 @@ When given, FACE is applied additionally."
           (pp x))
         (error "Unknown format spec for cite command (%s)" command)))))
 
-(defun org-citeseeing-render-isolated (citekey command)
-  "Render CITEKEY according to COMMAND as isolated reference.
-This version might be faster for a few isolated citations, but only 'bib or
-'cite style is available (see `citeproc-render-item')."
-  (if-let* ((spec (gethash command org-citeseeing--cite-commands)))
-      (let* ((modes (car spec))
-             (r-format (cadr spec))
-             (locale (or (and (functionp org-citeseeing-bib-item-locale)
-                              (funcall org-citeseeing-bib-item-locale citekey))
-                         org-citeseeing-bib-item-locale))
-             (style (citeproc-create-style
-                     (org-citeseeing--citeproc-csl-style command locale)
-                     (org-citeseeing--citeproc-csl-locale-getter)
-                     locale t))
-             (itemgetter (org-citeseeing--citeproc-itemgetter (org-citeseeing-bibliography)))
-             (item (car (funcall itemgetter (list citekey))))
-             (mode-to-str
-              (cl-pairlis modes
-                          (mapcar (lambda (mode)
-                                    (citeproc-render-item
-                                     (cdr item) style 'cite 'org t))
-                                  modes))))
-        (org-citeseeing--format r-format mode-to-str))
-    (error "Unknown renderer spec for cite command (%s)" command)))
+;; (defun org-citeseeing-render-isolated (citekey command)
+;;   "Render CITEKEY according to COMMAND as isolated reference.
+;; This version might be faster for a few isolated citations, but only 'bib or
+;; 'cite style is available (see `citeproc-render-item')."
+;;   (if-let* ((spec (gethash command org-citeseeing--cite-commands)))
+;;       (let* ((modes (car spec))
+;;              ;; (r-format (cadr spec))
+;;              (r-format (plist-get (cadr spec) :cite-format))
+;;              (locale (or (and (functionp org-citeseeing-bib-item-locale)
+;;                               (funcall org-citeseeing-bib-item-locale citekey))
+;;                          org-citeseeing-bib-item-locale))
+;;              (style (citeproc-create-style
+;;                      (org-citeseeing--citeproc-csl-style command locale)
+;;                      (org-citeseeing--citeproc-csl-locale-getter)
+;;                      locale t))
+;;              (itemgetter (org-citeseeing--citeproc-itemgetter (org-citeseeing-bibliography)))
+;;              (item (car (funcall itemgetter (list citekey))))
+;;              (mode-to-str
+;;               (cl-pairlis modes
+;;                           (mapcar (lambda (mode)
+;;                                     (citeproc-render-item
+;;                                      (cdr item) style 'cite 'org t))
+;;                                   modes))))
+;;         (org-citeseeing--format r-format mode-to-str))
+;;     (error "Unknown renderer spec for cite command (%s)" command)))
 
 (defun org-citeseeing--render-citation-link (command path)
   "Render citation for COMMAND and PATH."
   (if-let* ((spec (cadr (gethash command org-citeseeing--cite-commands)))
-            (outer-prefix (nth 0 spec))
-            (outer-suffix (nth 2 spec)))
+            (outer-prefix (or (plist-get spec :outer-prefix) ""))
+            (outer-suffix (or (plist-get spec :outer-suffix) ""))
+            (inner-prefix (or (plist-get spec :inner-prefix) ""))
+            (inner-suffix (or (plist-get spec :inner-suffix) "")))
       (let* ((tokens (org-ref-parse-cite-path path))
-             (inner-prefix (or (plist-get tokens :prefix) ""))
-             (inner-suffix (or (plist-get tokens :suffix) ""))
+             (outer-cite-prefix (or (plist-get tokens :prefix) ""))
+             (outer-cite-suffix (or (plist-get tokens :suffix) ""))
              (refs (mapconcat
                     (lambda (it)
                       (let* ((prefix (or (plist-get it :prefix) ""))
                              (suffix (or (plist-get it :suffix) ""))
                              (citekey (plist-get it :key)))
-                        (concat prefix
+                        (concat inner-prefix prefix
                                 (org-citeseeing-render citekey command)
-                                suffix)))
+                                suffix inner-suffix)))
                     (plist-get tokens :references))))
-        (concat outer-prefix inner-prefix refs inner-suffix outer-suffix))
+        (concat outer-prefix outer-cite-prefix
+                refs
+                outer-cite-suffix outer-suffix))
     (org-citeseeing--message "Passed link generation for %s" command)))
 
 ;;; Utility Functions
