@@ -50,10 +50,7 @@
 (defcustom org-citeseeing-debug nil
   "Set non-nil for verbose debug messages."
   :type 'boolean
-  :group 'org-citeseeing
-  :set (lambda (sym val)
-         (set-default sym val)
-         (require 'backtrace)))
+  :group 'org-citeseeing)
 
 (defcustom org-citeseeing-bibliography nil
   "Bibliography files to watch."
@@ -69,12 +66,12 @@ It should return the field value from the record with given citekey."
   :type 'function
   :group 'org-citeseeing)
 
-(defcustom org-citeseeing-bib-item-locale "en-US"
-  "Either a locale string (e.g., 'en-US', 'ja-JP') or a function that takes in a
-citekey as an argument and returns a locale string."
+(defcustom org-citeseeing-bib-item-locale 'en-US
+  "Either a locale symbol (e.g., en-US, ja-JP) or a function that takes in a
+citekey as an argument and returns a locale symbol."
   :type '(choice
-          (function :tag "Function returning locale string")
-          (string :tag "Locale string"))
+          (function :tag "Function returning locale symbol")
+          (symbol :tag "Locale symbol"))
   :group 'org-citeseeing)
 
 (defcustom org-citeseeing-csl-dir
@@ -95,7 +92,7 @@ should exist under this directory."
   "chicago-note-bibliography.csl"
   "A function or a filesystem path to a CSL style file.
 A function should take two arguments, a command (e.g., 'cite') and a
-locale (e.g., 'en-US'), returning a CSL style file path.
+locale (e.g., en-US), returning a CSL style file path.
 
 Unless the file path is absolute, it will be sought in `org-citeseeing-csl--styles-dir'."
   :type '(choice
@@ -107,7 +104,7 @@ Unless the file path is absolute, it will be sought in `org-citeseeing-csl--styl
 (defcustom org-citeseeing-command-alist
   '(("cite" . (:cite-format "${cp:nil}"))
     (("citep" "citep*")
-     . (("ja-JP"
+     . ((ja-JP
          . ( :outer-prefix "（"
              :cite-format "${cp:author-only}、${cp:year-only}"
              :outer-suffix "）" ))
@@ -116,8 +113,12 @@ Unless the file path is absolute, it will be sought in `org-citeseeing-csl--styl
              :cite-format "${cp:author-only}, ${cp:year-only}"
              :outer-suffix ")" ))))
     (("citet" "citet*")
-     . ( :cite-format "${cp:author-only} (${cp:year-only}"
-         :inner-suffix ")" ))
+     . ((ja-JP
+         . ( :cite-format "${cp:author-only}（${cp:year-only}"
+             :inner-suffix "）" ))
+        (t
+         . ( :cite-format "${cp:author-only} (${cp:year-only}"
+             :inner-suffix ")" ))))
     (("citeauthor" "citeauthor*") . (:cite-format "${cp:author-only}"))
     (("citetitle" "citetitle*") . (:cite-format "${cp:title-only}"))
     (("citeyear" "citeyear*") . (:cite-format "${cp:year-only}"))
@@ -128,33 +129,27 @@ See `org-citeseeing--format' for detail on string format template.
 The field name starting with 'cp:' refers to a `citeproc' mode (see
 `org-citeseeing--citeproc-modes' for all available modes). A non-mode field referes to that of
 current bibliography item, its value obtained via `org-citeseeing-bib-item-value-getter'."
-  ;; :type
-  ;; '(alist :key-type
-  ;;         (choice
-  ;;          (string :tag "Single command")
-  ;;          (repeat :tag "List of commands" string))
-  ;;         :value-type
-  ;;         (choice
-  ;;          (plist :key-type
-  ;;                 (choice
-  ;;                  (const :tag "Outer prefix string" :outer-prefix)
-  ;;                  (const :tag "Inner prefix string" :inner-prefix)
-  ;;                  (const :tag "Citation format string" :cite-format)
-  ;;                  (const :tag "Inner suffix string" :inner-suffix)
-  ;;                  (const :tag "Outer suffix string" :outer-suffix))
-  ;;                 :value-type string)
-  ;;          (alist :key-type (choice
-  ;;                            (string :tag "Locale string")
-  ;;                            (boolean :tag "non-nil for default locale"))
-  ;;                 :value-type
-  ;;                 (plist :key-type
-  ;;                        (choice
-  ;;                         (const :tag "Outer prefix string" :outer-prefix)
-  ;;                         (const :tag "Inner prefix string" :inner-prefix)
-  ;;                         (const :tag "Citation format string" :cite-format)
-  ;;                         (const :tag "Inner suffix string" :inner-suffix)
-  ;;                         (const :tag "Outer suffix string" :outer-suffix))
-  ;;                        :value-type string))))
+  :type
+  '(alist :key-type
+          (choice
+           (string :tag "Single command")
+           (repeat :tag "List of commands" string))
+          :value-type
+          (choice
+           (plist :options
+                  ((:outer-prefix (string :tag "Outer prefix string"))
+                   (:inner-prefix (string :tag "Inner prefix string"))
+                   (:cite-format (string :tag "Citation format string"))
+                   (:inner-suffix (string :tag "Inner suffix string"))
+                   (:outer-suffix (string :tag "Outer suffix string"))))
+           (alist :key-type (symbol :tag "Locale symbol or t")
+                  :value-type
+                  (plist :options
+                         ((:outer-prefix (string :tag "Outer prefix string"))
+                          (:inner-prefix (string :tag "Inner prefix string"))
+                          (:cite-format (string :tag "Citation format string"))
+                          (:inner-suffix (string :tag "Inner suffix string"))
+                          (:outer-suffix (string :tag "Outer suffix string")))))))
   :set
   (lambda (sym val)
     (set-default sym val)
@@ -168,8 +163,7 @@ current bibliography item, its value obtained via `org-citeseeing-bib-item-value
                     (make-hash-table :test #'equal)))
 
     (pcase-dolist (`(,commands . ,locale-specs) val)
-      (unless (let ((v (car-safe (car locale-specs))))
-                (or (stringp v) (eq v t)))
+      (when (null (car-safe (car locale-specs)))
         (setq locale-specs (list (cons t locale-specs))))
       (dolist (command (or (and (stringp commands) (list commands))
                            commands))
@@ -289,6 +283,12 @@ Intercepts font-lock execution to inject dynamic display strings."
 
       (setq-local org-cite-activate-processor 'org-citeseeing-oc-processor))))
 
+(defun org-citeseeing-bib-item-locale (citekey)
+  "Get locale symbol for CITEKEY item."
+  (or (and (functionp org-citeseeing-bib-item-locale)
+           (funcall org-citeseeing-bib-item-locale citekey))
+      org-citeseeing-bib-item-locale))
+
 (defun org-citeseeing--cache-clear (&rest _args)
   "Reset item getter."
   (interactive)               ; add for debug convenience
@@ -363,7 +363,8 @@ The itemgetter function gets cached for BIB-FILES and will be reused."
                 (itemgetter (org-citeseeing--citeproc-itemgetter bib-files)))
           (if-let* ((style (org-citeseeing--citeproc-csl-style command locale))
                     (locgetter (org-citeseeing--citeproc-csl-locale-getter)))
-              (let* ((proc (citeproc-create style itemgetter locgetter locale t)))
+              (let* ((proc (citeproc-create style itemgetter locgetter
+                                            (symbol-name locale) t)))
                 (prog1
                     proc
                   (setf (alist-get key
@@ -433,21 +434,22 @@ When given, FACE is applied additionally."
     str))
 
 (defun org-citeseeing--citekey-render (command citekey template modes)
-  "Render CITEKEY according to COMMAND."
+  "Render CITEKEY according to COMMAND.
+TEMPLATE ."
   (catch 'error-intercepted
     (handler-bind
         ((error
           (lambda (err)
-            (org-citeseeing--warn "%s\nBacktrace:\n%s"
-                                  (error-message-string err)
-                                  (backtrace-to-string))
+            (org-citeseeing--warn "Error on rendering '%s' for %s:\n%s"
+                                  template
+                                  citekey
+                                  (error-message-string err))
+            (org-citeseeing--backtrace)
             (throw 'error-intercepted
                    (org-citeseeing--propertize
                     (format "%s:%s" command citekey)
                     '(face org-citeseeing-cite-error-face))))))
-      (let* ((locale (or (and (functionp org-citeseeing-bib-item-locale)
-                              (funcall org-citeseeing-bib-item-locale citekey))
-                         org-citeseeing-bib-item-locale))
+      (let* ((locale (org-citeseeing-bib-item-locale citekey))
              (proc (org-citeseeing--citeproc-proc command locale))
              (citations
               (mapcar (lambda (mode)
@@ -460,6 +462,7 @@ When given, FACE is applied additionally."
                            proc citations)))
              (fallback (append fallback
                                `((citekey . ,citekey)))))
+        (cl-assert template)
         (org-citeseeing--propertize (org-citeseeing--format template fallback)
                                     nil
                                     ;; '(face org-citeseeing-cite-face)
@@ -493,66 +496,69 @@ When given, FACE is applied additionally."
 
 (defun org-citeseeing--render-citation-link (command path)
   "Render citation for COMMAND and PATH."
-  (if-let* ((locale-specs (gethash command org-citeseeing--cite-commands))
-            ;; (locale-specs (cadr modes-spec))
-
-            ;; (outer-prefix (or (plist-get spec :outer-prefix) ""))
-            ;; (outer-suffix (or (plist-get spec :outer-suffix) ""))
-            ;; (inner-prefix (or (plist-get spec :inner-prefix) ""))
-            ;; (inner-suffix (or (plist-get spec :inner-suffix) ""))
-            ;; (template (plist-get spec :cite-format))
-            )
+  (if-let* ((locale-specs (gethash command org-citeseeing--cite-commands)))
       (let* ((locale nil)
              (tokens (org-ref-parse-cite-path path))
              (common-prefix (or (plist-get tokens :prefix) ""))
              (common-suffix (or (plist-get tokens :suffix) ""))
-             (refs
+             (references (plist-get tokens :references))
+             (rendered
               (mapconcat
                (lambda (it)
                  (let* ((prenote (or (plist-get it :prefix) ""))
                         (postnote (or (plist-get it :suffix) ""))
                         (citekey (plist-get it :key)))
-                   (setq locale (or (and (functionp org-citeseeing-bib-item-locale)
-                                         (funcall org-citeseeing-bib-item-locale citekey))
-                                    org-citeseeing-bib-item-locale))
-                   (let* ((spec (or (alist-get locale locale-specs nil nil #'equal)
-                                    (alist-get t locale-specs))))
-                     (concat (or (plist-get spec :inner-prefix) "")
-                             prenote
+                   (setq locale (org-citeseeing-bib-item-locale citekey))
+                   (let* ((spec (or (alist-get locale locale-specs)
+                                    (alist-get t locale-specs)))
+                          (inner-prefix (or (plist-get spec :inner-prefix) ""))
+                          (inner-suffix (or (plist-get spec :inner-suffix) ""))
+                          (cite-format (plist-get spec :cite-format))
+                          (modes (plist-get spec :modes)))
+                     (concat inner-prefix prenote
                              (org-citeseeing--citekey-render
-                              command
-                              citekey
-                              (plist-get spec :cite-format)
-                              (plist-get spec :modes))
-                             postnote
-                             (or (plist-get spec :inner-suffix) "")))))
-               (plist-get tokens :references)))
-             (spec (or (alist-get locale locale-specs nil nil #'equal)
+                              command citekey cite-format modes)
+                             postnote inner-suffix))))
+               references))
+             (spec (or (alist-get locale locale-specs)
                        (alist-get t locale-specs)))
              (outer-prefix (or (plist-get spec :outer-prefix) ""))
              (outer-suffix (or (plist-get spec :outer-suffix) "")))
-        (concat outer-prefix common-prefix refs common-suffix outer-suffix))
+        (concat outer-prefix common-prefix rendered common-suffix outer-suffix))
     (org-citeseeing--message "Passed link generation for %s" command)))
 
 ;;; Utility Functions
 
 (defun org-citeseeing-langid-to-locale (langid)
-  "Get locale for given LANGID."
-  (alist-get langid citeproc-blt--langid-to-lang-alist nil nil #'equal))
-
-;; (defun org-citeseeing--s (str &optional locale)
-;;   (if (stringp str)
-;;       str
-;;     (or (alist-get locale str nil nil #'equal)
-;;         (alist-get nil str nil nil #'equal))))
+  "Get locale symbol for given LANGID string.
+Return nil if LANGID is unrecognized."
+  (when-let* ((locale (alist-get langid citeproc-blt--langid-to-lang-alist
+                                 nil nil #'equal)))
+    (intern locale)))
 
 (defun org-citeseeing--message (s &rest _rest)
-  (when org-citeseeing-debug
-    (apply #'message `(,(concat "[org-citeseeing] " s) ,@_rest))))
+  "Display an `org-citeseeing' message at the bottom of the screen."
+  (apply #'message `(,(concat "[org-citeseeing] " s) ,@_rest)))
 
 (defun org-citeseeing--warn (s &rest _rest)
+  "Display an `org-citeseeing' warning message."
+  (apply #'warn `(,(concat "[org-citeseeing] " s) ,@_rest)))
+
+(defun org-citeseeing--backtrace ()
+  "Display an `org-citeseeing' backtrace buffer when debug mode is on."
   (when org-citeseeing-debug
-    (apply #'warn `(,(concat "[org-citeseeing] " s) ,@_rest))))
+    (require 'backtrace)
+    (let ((buf (get-buffer-create "*Backtrace*")))
+      (with-current-buffer buf
+        (let* ((inhibit-read-only t)
+               (bt (backtrace-to-string))
+               (bt (string-join (nthcdr 3 (string-split bt "\n"))
+                                "\n")))
+          (erase-buffer)
+          (insert (format "Backtrace:\n%s" bt))
+          (special-mode)
+          (goto-char (point-min))))
+      (pop-to-buffer buf))))
 
 (provide 'org-citeseeing)
 ;;; org-citeseeing.el ends here
